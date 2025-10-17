@@ -1,64 +1,44 @@
-// api/summarize.ts
-import OpenAI from "openai"
-import fs from "fs"
-import path from "path"
+// pages/api/summarize.ts
+import type { NextApiRequest, NextApiResponse } from "next"
 
-export default async function handler(req: Request): Promise<Response> {
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" })
   try {
-    if (req.method !== "POST") {
-      return new Response(JSON.stringify({ error: "method_not_allowed" }), { status: 405 })
-    }
+    const { text, prompt, model = "gpt-4o-mini", temperature = 0.3, maxTokens = 600 } = req.body || {}
+    if (!text || typeof text !== "string") return res.status(400).json({ error: "Missing text" })
 
-    // ✅ 1️⃣ 사용자로부터 'page' 값 받기
-    const { page = 1 } = await req.json()
+    const apiKey = process.env.OPENAI_API_KEY
+    if (!apiKey) return res.status(500).json({ error: "Missing OPENAI_API_KEY" })
 
-    // ✅ 2️⃣ 전체 페이지 수 (프로토타입에서는 고정값)
-    const TOTAL_PAGES = 20 // 예: 텍스트를 20페이지 분량으로 간주
+    const sys = (prompt && String(prompt)) || "다음 텍스트를 간결하고 핵심 위주로 요약하세요."
+    const user = text.slice(0, 200000) // 안전 가드
 
-    // 페이지 값이 유효한 범위인지 확인
-    const currentPage = Math.min(Math.max(page, 1), TOTAL_PAGES)
-
-    // ✅ 3️⃣ txt 파일 읽기
-    const filePath = path.join(process.cwd(), "public", "texts", "novel.txt")
-    const fullText = fs.readFileSync(filePath, "utf-8")
-
-    // ✅ 4️⃣ 페이지 비율 계산 후, 그만큼 텍스트 추출
-    const percent = (currentPage / TOTAL_PAGES) * 100
-    const cutLength = Math.floor((fullText.length * currentPage) / TOTAL_PAGES)
-    const slicedText = fullText.slice(0, cutLength)
-
-    // ✅ 5️⃣ 요약 프롬프트 구성
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-    const prompt = `
-      아래 글은 작품 전체의 약 ${percent.toFixed(1)}% (페이지 ${currentPage}/${TOTAL_PAGES}) 지점까지의 내용입니다.
-      이 구간까지만 간결하게 요약해줘.
-
-      ${slicedText}
-    `
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "You are a helpful summarizer." },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.2,
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature,
+        max_tokens: maxTokens,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: user },
+        ],
+      }),
     })
 
-    const summary = completion.choices?.[0]?.message?.content ?? ""
+    if (!r.ok) {
+      const err = await r.text().catch(() => "")
+      return res.status(500).json({ error: `OpenAI error ${r.status}`, detail: err })
+    }
 
-    return new Response(
-      JSON.stringify({ summary, currentPage, totalPages: TOTAL_PAGES }),
-      {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }
-    )
+    const data = await r.json()
+    const summary = data?.choices?.[0]?.message?.content?.trim?.() || ""
+    return res.status(200).json({ summary })
   } catch (e: any) {
-    console.error(e)
-    return new Response(
-      JSON.stringify({ error: "server_error", details: e.message }),
-      { status: 500 }
-    )
+    return res.status(500).json({ error: e?.message || "Unknown error" })
   }
 }
